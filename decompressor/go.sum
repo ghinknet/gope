@@ -1,0 +1,4 @@
+github.com/ghinknet/toolbox v1.7.0 h1:Sm9VDLcH1jNuLX2CLxOGvseWxyRPZzg9VybEbMjoyrI=
+github.com/ghinknet/toolbox v1.7.0/go.mod h1:Lff6X6WhkKWrhg6YvWK2QVX8pnZfpf6b/ecfT4uiBe4=
+github.com/klauspost/compress v1.18.4 h1:RPhnKRAQ4Fh8zU2FY/6ZFDwTVTxgJ/EMydqSTzE9a2c=
+github.com/klauspost/compress v1.18.4/go.mod h1:R0h/fSBs8DE4ENlcrlib3PsXS61voFxhIs2DeRhCvJ4=
