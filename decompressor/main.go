@@ -49,7 +49,7 @@ func main() {
 	// Construct executable path
 	binaryPath := filepath.Join(
 		mkTemp.Path(),
-		expr.Ternary(runtime.GOOS == "windows", "compressed.exe", "compressed"),
+		expr.Ternary(runtime.GOOS == "windows", "executable.exe", "executable"),
 	)
 
 	func() {
