@@ -10,12 +10,13 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ghinknet/gope/internal/compress/zstd"
-	"github.com/ghinknet/gope/internal/constant"
-	"github.com/ghinknet/gope/internal/runner"
-	"github.com/ghinknet/gope/internal/temp"
-	"github.com/ghinknet/toolbox/expr"
 	"github.com/spf13/cobra"
+	"go.gh.ink/gope/internal/compress/gzip"
+	"go.gh.ink/gope/internal/compress/zstd"
+	"go.gh.ink/gope/internal/constant"
+	"go.gh.ink/gope/internal/runner"
+	"go.gh.ink/gope/internal/temp"
+	"go.gh.ink/toolbox/expr"
 )
 
 //go:embed decompressorSourceCode
@@ -45,6 +46,9 @@ var system string
 var arch string
 var upx bool
 var quiet bool
+var runMode string
+var level int
+var upxLevel int
 
 var goPath string
 var upxPath string
@@ -58,6 +62,9 @@ func init() {
 	rootCmd.Flags().StringVarP(&arch, "arch", "a", runtime.GOARCH, "Destination arch")
 	rootCmd.Flags().BoolVarP(&upx, "upx", "u", false, "Use UPX to compress again")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Quiet mode")
+	rootCmd.Flags().StringVarP(&runMode, "run-mode", "r", "mask", "Decompressor run mode: mask or replace")
+	rootCmd.Flags().IntVarP(&level, "level", "l", 3, "Compression level 1-10")
+	rootCmd.Flags().IntVarP(&upxLevel, "upx-level", "U", 9, "UPX compression level 1-10")
 
 	rootCmd.Flags().StringVarP(&goPath, "go-path", "g", "go", "Go path")
 	rootCmd.Flags().StringVarP(&upxPath, "upx-path", "p", "upx", "UPX path")
@@ -71,27 +78,22 @@ func main() {
 }
 
 func Runner(cmd *cobra.Command, args []string) error {
-	// Check flags
-	if input == "" {
-		return fmt.Errorf("input file is required")
-	}
-	if !slices.Contains(constant.SupportedMethods, method) {
-		return fmt.Errorf("method %s is not supported", method)
-	}
-	if !slices.Contains(constant.SupportedPlatforms, system+"/"+arch) {
-		return fmt.Errorf("unsupported platform: %s/%s", system, arch)
+	return run()
+}
+
+func run() error {
+	if err := validateFlags(); err != nil {
+		return err
 	}
 
-	// Get work dir
 	workDir, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("error getting work dir: %v", err)
+		return fmt.Errorf("error getting work dir: %w", err)
 	}
 
-	// Read input file
 	inFile, err := os.Open(input)
 	if err != nil {
-		return fmt.Errorf("error opening input file: %v", err)
+		return fmt.Errorf("error opening input file: %w", err)
 	}
 	defer func(inFile *os.File) {
 		if e := inFile.Close(); e != nil {
@@ -99,10 +101,9 @@ func Runner(cmd *cobra.Command, args []string) error {
 		}
 	}(inFile)
 
-	// Make temp dir
 	mkTemp, err := temp.MkTemp()
 	if err != nil {
-		return fmt.Errorf("error making temp dir: %v", err)
+		return fmt.Errorf("error making temp dir: %w", err)
 	}
 	defer func(mkTemp temp.Dir) {
 		if e := mkTemp.Release(); e != nil {
@@ -113,10 +114,79 @@ func Runner(cmd *cobra.Command, args []string) error {
 		log.Println("Made temp dir:", mkTemp.Path())
 	}
 
-	// Create output file
-	outFile, err := os.Create(filepath.Join(mkTemp.Path(), "compressed"))
+	if err = compressInput(inFile, mkTemp.Path()); err != nil {
+		return err
+	}
+
+	if err = releaseEmbedded(mkTemp.Path()); err != nil {
+		return fmt.Errorf("error releasing embedded resource code: %w", err)
+	}
+	if !quiet {
+		log.Println("Released embedded resource code")
+	}
+
+	if err = zstd.BatchDecompress(
+		filepath.Join(mkTemp.Path(), "decompressorSourceCode"),
+		mkTemp.Path(),
+	); err != nil {
+		return fmt.Errorf("error decompressing decompressor: %w", err)
+	}
+	if !quiet {
+		log.Println("Decompressed decompressor")
+	}
+
+	if err = tidyModule(mkTemp.Path()); err != nil {
+		return err
+	}
+
+	if err = buildDecompressor(mkTemp.Path()); err != nil {
+		return err
+	}
+
+	if err = packWithUpxIfNeeded(mkTemp.Path()); err != nil {
+		return err
+	}
+
+	if err = moveOutput(mkTemp.Path(), workDir); err != nil {
+		return err
+	}
+
+	if err = chmodOutputIfNeeded(workDir); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateFlags() error {
+	if input == "" {
+		return fmt.Errorf("input file is required")
+	}
+	if !slices.Contains(constant.SupportedMethods, method) {
+		return fmt.Errorf("method %s is not supported", method)
+	}
+	if !slices.Contains(constant.SupportedPlatforms, system+"/"+arch) {
+		return fmt.Errorf("unsupported platform: %s/%s", system, arch)
+	}
+	if runMode != "mask" && runMode != "replace" {
+		return fmt.Errorf("unsupported run mode: %s", runMode)
+	}
+	if system == "windows" {
+		runMode = "mask"
+	}
+	if level < 1 || level > 10 {
+		return fmt.Errorf("compression level must be 1-10")
+	}
+	if upxLevel < 1 || upxLevel > 10 {
+		return fmt.Errorf("upx level must be 1-10")
+	}
+	return nil
+}
+
+func compressInput(inFile *os.File, tempDir string) error {
+	outFile, err := os.Create(filepath.Join(tempDir, "compressed"))
 	if err != nil {
-		return fmt.Errorf("error creating output file: %v", err)
+		return fmt.Errorf("error creating output file: %w", err)
 	}
 	defer func(outFile *os.File) {
 		if e := outFile.Close(); e != nil {
@@ -124,129 +194,158 @@ func Runner(cmd *cobra.Command, args []string) error {
 		}
 	}(outFile)
 
-	// Create compress
-	compressed, err := zstd.Compress(inFile, outFile)
+	var compressed int64
+	switch method {
+	case "zstd":
+		compressed, err = zstd.Compress(inFile, outFile, level)
+	case "gzip":
+		compressed, err = gzip.Compress(inFile, outFile, level)
+	default:
+		return fmt.Errorf("unsupported method: %s", method)
+	}
 	if err != nil {
-		return fmt.Errorf("error compressing file: %v", err)
+		return fmt.Errorf("error compressing file: %w", err)
 	}
 	if !quiet {
 		log.Println("Compressed", input, "to", compressed, "bytes")
 	}
+	return nil
+}
 
-	// Release decompressor source code packet
-	if err = releaseEmbedded(mkTemp.Path()); err != nil {
-		return fmt.Errorf("error releasing embedded resource code: %v", err)
-	}
-	if !quiet {
-		log.Println("Released embedded resource code")
-	}
-
-	// Decompress decompressor
-	if err = zstd.BatchDecompress(
-		filepath.Join(mkTemp.Path(), "decompressorSourceCode"),
-		mkTemp.Path(),
-	); err != nil {
-		return fmt.Errorf("error decompressing decompressor: %v", err)
-	}
-	if !quiet {
-		log.Println("Decompressed decompressor")
-	}
-
-	// Tidy go mod
-	// Pack up with decompressor
-	_, err = runner.Run(
+func tidyModule(tempDir string) error {
+	_, err := runner.Run(
 		[]string{},
-		goPath, []string{
-			"mod", "tidy",
-		}, mkTemp.Path(),
+		goPath,
+		[]string{"mod", "tidy"},
+		tempDir,
 		quiet,
 	)
 	if err != nil {
-		return fmt.Errorf("error tiding mod with go: %v", err)
+		return fmt.Errorf("error tiding mod with go: %w", err)
 	}
 	if !quiet {
 		log.Println("Tidied up with go")
 	}
+	return nil
+}
 
-	// Pack up with decompressor
-	_, err = runner.Run(
+func buildDecompressor(tempDir string) error {
+	ldFlags := []string{
+		"-s",
+		"-w",
+		"-X", "main.buildMode=" + runMode,
+	}
+	_, err := runner.Run(
 		[]string{"GOOS=" + system, "GOARCH=" + arch},
-		goPath, []string{
+		goPath,
+		[]string{
 			"build",
-			"-ldflags=-s", "-ldflags=-w",
+			"-ldflags=" + strings.Join(ldFlags, " "),
 			"-trimpath",
 			"-tags", method,
 			"-o", "output",
-		}, mkTemp.Path(),
+		},
+		tempDir,
 		quiet,
 	)
 	if err != nil {
-		return fmt.Errorf("error packing with decompressor: %v", err)
+		return fmt.Errorf("error packing up: %w", err)
 	}
 	if !quiet {
-		log.Println("Packed with decompressor")
+		log.Println("Packed up successfully")
+	}
+	return nil
+}
+
+func packWithUpxIfNeeded(tempDir string) error {
+	if !upx {
+		return nil
 	}
 
-	// If UPX enabled then pack with UPX
-	if upx {
-		// TODO: works very weird ?
-		if runtime.GOOS != "windows" && system == "windows" {
-			_, err = runner.Run(
-				[]string{},
-				winePath, []string{
-					expr.Ternary(strings.HasSuffix(upxPath, ".exe"), upxPath, upxPath+".exe"),
-					"output",
-					"-9",
-				},
-				mkTemp.Path(),
-				quiet,
-			)
-			if err != nil {
-				return fmt.Errorf("error packing with UPX by wine: %v", err)
-			}
-			if !quiet {
-				log.Println("Packed with UPX by wine")
-			}
-		} else {
-			_, err = runner.Run(
-				[]string{},
-				upxPath, []string{
-					"output",
-					"-9",
-				},
-				mkTemp.Path(),
-				quiet,
-			)
-			if err != nil {
-				return fmt.Errorf("error packing with UPX: %v", err)
-			}
-			if !quiet {
-				log.Println("Packed with UPX")
-			}
+	host := runtime.GOOS
+	target := system
+
+	switch {
+	case host == "windows" && target == "windows":
+		return runUpx(tempDir, upxPath, false)
+	case host == "linux" && target == "linux":
+		return runUpx(tempDir, upxPath, false)
+	case host == "linux" && target == "windows":
+		return runUpx(tempDir, upxPath, true)
+	default:
+		return fmt.Errorf("UPX is not supported for host %s and target %s", host, target)
+	}
+}
+
+func runUpx(tempDir string, upxPath string, useWine bool) error {
+	upxArg := fmt.Sprintf("-%d", mapUpxLevel(upxLevel))
+	if useWine {
+		_, err := runner.Run(
+			[]string{},
+			winePath,
+			[]string{
+				expr.Ternary(strings.HasSuffix(upxPath, ".exe"), upxPath, upxPath+".exe"),
+				"output",
+				upxArg,
+			},
+			tempDir,
+			quiet,
+		)
+		if err != nil {
+			return fmt.Errorf("error packing with UPX by wine: %w", err)
 		}
+		if !quiet {
+			log.Println("Packed with UPX by wine")
+		}
+		return nil
 	}
 
-	// Move to output destination
-	err = temp.MvFile(
-		filepath.Join(mkTemp.Path(), "output"),
-		filepath.Join(
-			workDir,
-			expr.Ternary(strings.HasSuffix(output, ".exe") || system != "windows", output, output+".exe"),
-		),
+	_, err := runner.Run(
+		[]string{},
+		upxPath,
+		[]string{"output", upxArg},
+		tempDir,
+		quiet,
 	)
 	if err != nil {
-		return fmt.Errorf("error moving result: %v", err)
+		return fmt.Errorf("error packing with UPX: %w", err)
+	}
+	if !quiet {
+		log.Println("Packed with UPX")
+	}
+	return nil
+}
+
+func mapUpxLevel(level int) int {
+	if level < 1 {
+		return 1
+	}
+	if level >= 9 {
+		return 9
+	}
+	return level
+}
+
+func moveOutput(tempDir string, workDir string) error {
+	outputPath := filepath.Join(
+		workDir,
+		expr.Ternary(strings.HasSuffix(output, ".exe") || system != "windows", output, output+".exe"),
+	)
+	if err := temp.MvFile(filepath.Join(tempDir, "output"), outputPath); err != nil {
+		return fmt.Errorf("error moving result: %w", err)
 	}
 	if !quiet {
 		log.Println("Moved result")
 	}
+	return nil
+}
 
-	// Set executable permission
-	if runtime.GOOS != "windows" && system != "windows" {
-		if err = os.Chmod(filepath.Join(workDir, output), 0755); err != nil {
-			return fmt.Errorf("setting executable permission failed: %v", err)
-		}
+func chmodOutputIfNeeded(workDir string) error {
+	if runtime.GOOS == "windows" || system == "windows" {
+		return nil
 	}
-
+	if err := os.Chmod(filepath.Join(workDir, output), 0755); err != nil {
+		return fmt.Errorf("setting executable permission failed: %w", err)
+	}
 	return nil
 }

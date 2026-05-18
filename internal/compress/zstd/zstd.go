@@ -13,9 +13,9 @@ import (
 )
 
 // Compress compresses the source stream
-func Compress(src io.Reader, dst io.Writer) (int64, error) {
+func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	// Create zstd compressor
-	encoder, err := zstd.NewWriter(dst)
+	encoder, err := zstd.NewWriter(dst, zstd.WithEncoderLevel(mapLevel(level)))
 	if err != nil {
 		return 0, err
 	}
@@ -27,6 +27,16 @@ func Compress(src io.Reader, dst io.Writer) (int64, error) {
 
 	// Compress
 	return io.Copy(encoder, src)
+}
+
+func mapLevel(level int) zstd.EncoderLevel {
+	if level < 1 {
+		level = 1
+	}
+	if level > 10 {
+		level = 10
+	}
+	return zstd.EncoderLevelFromZstd(level)
 }
 
 // BatchDecompress decompress a batch archive file

@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -12,77 +11,65 @@ import (
 
 // Run an executable with passthrough
 func Run(binaryPath string, args []string, workingDir string) (int, error) {
-	ctx := context.Background()
-
-	// Create command
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
-
-	// Set working directory
+	cmd := exec.Command(binaryPath, args...)
 	cmd.Dir = workingDir
-
-	// Set standard input output
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	// Set environment variables (optional custom environment variables)
 	cmd.Env = os.Environ()
+	applySysProcAttr(cmd)
 
-	// Start the command
 	if err := cmd.Start(); err != nil {
 		return -1, err
 	}
 
-	// Make a channel to receive signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	stopForward := startSignalForwarding(cmd)
+	defer stopForward()
 
-	// Create a goroutine to forward signals
+	return exitCode(cmd.Wait())
+}
+
+func startSignalForwarding(cmd *exec.Cmd) func() {
+	if len(forwardSignals) == 0 {
+		return func() {}
+	}
+	// Buffer prevents missed signals during bursts.
+	sigChan := make(chan os.Signal, 4)
+	signal.Notify(sigChan, forwardSignals...)
+
 	go func() {
 		for sig := range sigChan {
-			if cmd.Process != nil {
-				// Forward the signal to the child process
-				if err := cmd.Process.Signal(sig); err != nil {
-					panic(err)
-				}
-
-				// If it's SIGINT, also send it to yourself
-				if sig == syscall.SIGINT {
-					// Optionally: You can set a timeout
-					// if the child process doesn't exit
-					// then force kill it
-					time.AfterFunc(3*time.Second, func() {
-						if cmd.Process != nil {
-							_ = cmd.Process.Kill()
-						}
-					})
-				}
+			_ = forwardSignal(cmd, sig)
+			if isTerminationSignal(sig) {
+				time.AfterFunc(5*time.Second, func() {
+					forceKill(cmd)
+				})
 			}
 		}
 	}()
 
-	// Waiting for the command to finish
-	err := cmd.Wait()
-
-	// Clean up the signal handler
-	signal.Stop(sigChan)
-	close(sigChan)
-
-	// Handle the exit code
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			// Get the exit status
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				return status.ExitStatus(), nil
-			}
-			// If the status cannot be obtained, return 1
-			return 1, nil
-		}
-		// Non-exit error
-		return -1, err
+	return func() {
+		signal.Stop(sigChan)
+		close(sigChan)
 	}
+}
 
-	// Normal exit
-	return 0, nil
+func exitCode(err error) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return -1, err
+}
+
+func isTerminationSignal(sig os.Signal) bool {
+	switch sig {
+	case os.Interrupt, syscall.SIGTERM, syscall.SIGINT:
+		return true
+	default:
+		return false
+	}
 }

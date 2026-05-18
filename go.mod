@@ -1,11 +1,11 @@
-module github.com/ghinknet/gope
+module go.gh.ink/gope
 
-go 1.25.5
+go 1.26.3
 
 require (
-	github.com/ghinknet/toolbox v1.7.0
-	github.com/klauspost/compress v1.18.4
+	github.com/klauspost/compress v1.18.6
 	github.com/spf13/cobra v1.10.2
+	go.gh.ink/toolbox v1.14.1
 )
 
 require (

@@ -1,8 +1,5 @@
-module github.com/ghinknet/gope/decompressor
+module go.gh.ink/gope/decompressor
 
-go 1.25.5
+go 1.26.3
 
-require (
-	github.com/ghinknet/toolbox v1.7.0
-	github.com/klauspost/compress v1.18.4
-)
+require github.com/klauspost/compress v1.18.6

@@ -31,7 +31,6 @@ func (d *Dir) Path() string {
 
 // MvFile moves file from temp src to dst
 func MvFile(src string, dst string) error {
-	// Open source file
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -42,7 +41,6 @@ func MvFile(src string, dst string) error {
 		}
 	}(srcFile)
 
-	// Create destination file
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -53,18 +51,12 @@ func MvFile(src string, dst string) error {
 		}
 	}(dstFile)
 
-	// Copy content
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
+	if _, err = io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	if err = dstFile.Sync(); err != nil {
 		return err
 	}
 
-	// Sync to disk
-	err = dstFile.Sync()
-	if err != nil {
-		return err
-	}
-
-	// Delete source file
 	return os.Remove(src)
 }

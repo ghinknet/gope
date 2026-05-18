@@ -22,20 +22,13 @@ func main() {
 	flag.IntVar(&parallel, "p", runtime.NumCPU()-1, "Number of parallel tasks (default: CPU count)")
 	flag.Parse()
 
-	if err := os.RemoveAll("dists"); err != nil {
-		fmt.Printf("❌ Failed to remove dists: %v\n", err)
+	if err := resetWorkspace(); err != nil {
+		fmt.Printf("❌ %v\n", err)
 		return
 	}
 
-	if err := os.RemoveAll("decompressorSourceCode"); err != nil {
-		fmt.Printf("❌ Failed to remove decompressorSourceCode: %v\n", err)
-		return
-	}
-
-	cmd := exec.Command("go", "run", "./packer/main.go")
-	if lines, err := cmd.Output(); err != nil {
-		fmt.Printf("❌ Failed to run packer/main.go generate: %v\n", err)
-		fmt.Printf("  %s\n", string(lines))
+	if err := runPacker(); err != nil {
+		fmt.Printf("❌ Failed to run packer: %v\n", err)
 		return
 	}
 
@@ -52,32 +45,36 @@ func main() {
 		return
 	}
 
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, parallel)
-
 	fmt.Printf("🚀 Start compile with prefix: %s\n", namePrefix)
 	fmt.Printf("📦 Dest platforms: %d\n", len(platforms))
 	fmt.Printf("⚡ Parallel tasks: %d\n", parallel)
 
-	for _, platform := range platforms {
-		wg.Add(1)
-		semaphore <- struct{}{}
+	compileAll(platforms, namePrefix, parallel)
 
-		go func(p Platform) {
-			defer wg.Done()
-			defer func() { <-semaphore }()
-
-			compilePlatform(p, namePrefix)
-		}(platform)
-	}
-
-	wg.Wait()
 	fmt.Printf("\n🎉 All compile tasks done! Output file under dists.\n")
 
 	if err = os.RemoveAll("decompressorSourceCode"); err != nil {
 		fmt.Printf("❌ Failed to remove decompressorSourceCode: %v\n", err)
-		return
 	}
+}
+
+func resetWorkspace() error {
+	if err := os.RemoveAll("dists"); err != nil {
+		return fmt.Errorf("failed to remove dists: %w", err)
+	}
+	if err := os.RemoveAll("decompressorSourceCode"); err != nil {
+		return fmt.Errorf("failed to remove decompressorSourceCode: %w", err)
+	}
+	return nil
+}
+
+func runPacker() error {
+	cmd := exec.Command("go", "run", "./packer/main.go")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v\n%s", err, string(output))
+	}
+	return nil
 }
 
 func getPlatforms() ([]Platform, error) {
@@ -106,6 +103,25 @@ func getPlatforms() ([]Platform, error) {
 	}
 
 	return platforms, nil
+}
+
+func compileAll(platforms []Platform, namePrefix string, parallel int) {
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, parallel)
+
+	for _, platform := range platforms {
+		wg.Add(1)
+		semaphore <- struct{}{}
+
+		go func(p Platform) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			compilePlatform(p, namePrefix)
+		}(platform)
+	}
+
+	wg.Wait()
 }
 
 func compilePlatform(platform Platform, namePrefix string) {

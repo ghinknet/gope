@@ -11,11 +11,15 @@ import (
 )
 
 func main() {
-	// Create output file
+	if err := run(); err != nil {
+		fmt.Println("error packing decompressor:", err)
+	}
+}
+
+func run() error {
 	outFile, err := os.Create("decompressorSourceCode")
 	if err != nil {
-		fmt.Println("error creating output file:", err)
-		return
+		return fmt.Errorf("error creating output file: %w", err)
 	}
 	defer func(outFile *os.File) {
 		if e := outFile.Close(); e != nil {
@@ -23,11 +27,9 @@ func main() {
 		}
 	}(outFile)
 
-	// Create zstd compressor
 	zstdWriter, err := zstd.NewWriter(outFile)
 	if err != nil {
-		fmt.Println("error creating zstd compressor:", err)
-		return
+		return fmt.Errorf("error creating zstd compressor: %w", err)
 	}
 	defer func(zstdWriter *zstd.Encoder) {
 		if e := zstdWriter.Close(); e != nil {
@@ -35,7 +37,6 @@ func main() {
 		}
 	}(zstdWriter)
 
-	// Create tar writer
 	tarWriter := tar.NewWriter(zstdWriter)
 	defer func(tarWriter *tar.Writer) {
 		if e := tarWriter.Close(); e != nil {
@@ -43,12 +44,11 @@ func main() {
 		}
 	}(tarWriter)
 
-	err = filepath.Walk("decompressor", func(filePath string, info os.FileInfo, err error) error {
+	return filepath.Walk("decompressor", func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Create tar file header
 		header, err := tar.FileInfoHeader(info, info.Name())
 		if err != nil {
 			return err
@@ -58,19 +58,17 @@ func main() {
 			return err
 		}
 		header.Name = relPath
-		if relPath == "." { // Skip root
+		if relPath == "." {
 			return nil
 		}
 
-		// Write header
 		if err = tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
-
-		// Write file
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+
 		f, err := os.Open(filePath)
 		if err != nil {
 			return err
@@ -80,6 +78,7 @@ func main() {
 				panic(e)
 			}
 		}(f)
+
 		_, err = io.Copy(tarWriter, f)
 		return err
 	})

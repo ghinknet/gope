@@ -3,7 +3,7 @@ package constant
 import (
 	"fmt"
 
-	"github.com/ghinknet/toolbox/crypto/fingerprint"
+	"go.gh.ink/toolbox/crypto/fingerprint"
 )
 
 const Name = "GoPE"
