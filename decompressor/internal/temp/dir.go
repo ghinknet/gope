@@ -2,6 +2,7 @@ package temp
 
 import "os"
 
+// Temporary directory helpers for the decompressor runtime.
 // Dir is the temporary directory object
 type Dir struct {
 	path string

@@ -19,16 +19,19 @@ import (
 	"go.gh.ink/toolbox/expr"
 )
 
-//go:embed decompressorSourceCode
+// Embedded decompressor source archive used to build the runtime wrapper.
+//
+//go:embed decomp_src
 var embeddedDecompressor []byte
 
 // ReleaseEmbedded releases the embedded compressed executable
 func releaseEmbedded(temp string) error {
 	return os.WriteFile(
-		filepath.Join(temp, "decompressorSourceCode"), embeddedDecompressor, 0644,
+		filepath.Join(temp, "decomp_src"), embeddedDecompressor, 0644,
 	)
 }
 
+// CLI configuration.
 var rootCmd = &cobra.Command{
 	Use: constant.Name,
 	Long: `Go Packer for Executable
@@ -39,6 +42,7 @@ A go-based cross platform binary compressor.
 	RunE:    Runner,
 }
 
+// CLI flags.
 var input string
 var output string
 var method string
@@ -77,6 +81,8 @@ func main() {
 	}
 }
 
+// Runner
+// Main pack pipeline: validate -> compress -> unpack decompressor -> build wrapper -> optional UPX -> move output.
 func Runner(cmd *cobra.Command, args []string) error {
 	return run()
 }
@@ -126,7 +132,7 @@ func run() error {
 	}
 
 	if err = zstd.BatchDecompress(
-		filepath.Join(mkTemp.Path(), "decompressorSourceCode"),
+		filepath.Join(mkTemp.Path(), "decomp_src"),
 		mkTemp.Path(),
 	); err != nil {
 		return fmt.Errorf("error decompressing decompressor: %w", err)
@@ -158,6 +164,7 @@ func run() error {
 	return nil
 }
 
+// Validate and normalise user input.
 func validateFlags() error {
 	if input == "" {
 		return fmt.Errorf("input file is required")
@@ -183,6 +190,7 @@ func validateFlags() error {
 	return nil
 }
 
+// Compress input into a temporary archive.
 func compressInput(inFile *os.File, tempDir string) error {
 	outFile, err := os.Create(filepath.Join(tempDir, "compressed"))
 	if err != nil {
@@ -212,23 +220,7 @@ func compressInput(inFile *os.File, tempDir string) error {
 	return nil
 }
 
-func tidyModule(tempDir string) error {
-	_, err := runner.Run(
-		[]string{},
-		goPath,
-		[]string{"mod", "tidy"},
-		tempDir,
-		quiet,
-	)
-	if err != nil {
-		return fmt.Errorf("error tiding mod with go: %w", err)
-	}
-	if !quiet {
-		log.Println("Tidied up with go")
-	}
-	return nil
-}
-
+// Build the decompressor wrapper with the selected build mode.
 func buildDecompressor(tempDir string) error {
 	ldFlags := []string{
 		"-s",
@@ -257,6 +249,7 @@ func buildDecompressor(tempDir string) error {
 	return nil
 }
 
+// Apply UPX with strict host/target rules.
 func packWithUpxIfNeeded(tempDir string) error {
 	if !upx {
 		return nil
@@ -277,6 +270,7 @@ func packWithUpxIfNeeded(tempDir string) error {
 	}
 }
 
+// Run UPX with or without wine.
 func runUpx(tempDir string, upxPath string, useWine bool) error {
 	upxArg := fmt.Sprintf("-%d", mapUpxLevel(upxLevel))
 	if useWine {
@@ -326,6 +320,7 @@ func mapUpxLevel(level int) int {
 	return level
 }
 
+// Move output to the requested destination.
 func moveOutput(tempDir string, workDir string) error {
 	outputPath := filepath.Join(
 		workDir,
@@ -340,6 +335,7 @@ func moveOutput(tempDir string, workDir string) error {
 	return nil
 }
 
+// Fix executable bit on non-Windows targets.
 func chmodOutputIfNeeded(workDir string) error {
 	if runtime.GOOS == "windows" || system == "windows" {
 		return nil
@@ -349,3 +345,22 @@ func chmodOutputIfNeeded(workDir string) error {
 	}
 	return nil
 }
+
+// Tidy go.mod for the decompressor workspace.
+func tidyModule(tempDir string) error {
+	_, err := runner.Run(
+		[]string{},
+		goPath,
+		[]string{"mod", "tidy"},
+		tempDir,
+		quiet,
+	)
+	if err != nil {
+		return fmt.Errorf("error tiding mod with go: %w", err)
+	}
+	if !quiet {
+		log.Println("Tidied up with go")
+	}
+	return nil
+}
+

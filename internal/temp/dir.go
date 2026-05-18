@@ -6,6 +6,7 @@ import (
 )
 
 // Dir is the temporary directory object
+// Temp directory utilities used across pack/build flows.
 type Dir struct {
 	path string
 }

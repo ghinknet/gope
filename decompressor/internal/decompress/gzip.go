@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-// Decompress decompresses the source gzip stream
+// Decompress decompresses the source gzip stream.
 func Decompress(src io.Reader, dst io.Writer) (int64, error) {
 	reader, err := gzip.NewReader(src)
 	if err != nil {
@@ -19,4 +19,3 @@ func Decompress(src io.Reader, dst io.Writer) (int64, error) {
 
 	return io.Copy(dst, reader)
 }
-

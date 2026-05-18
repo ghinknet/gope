@@ -12,7 +12,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Compress compresses the source stream
+// Compress compresses the source stream.
 func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	// Create zstd compressor
 	encoder, err := zstd.NewWriter(dst, zstd.WithEncoderLevel(mapLevel(level)))
@@ -29,6 +29,7 @@ func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	return io.Copy(encoder, src)
 }
 
+// mapLevel converts a 1-10 level into a zstd encoder level.
 func mapLevel(level int) zstd.EncoderLevel {
 	if level < 1 {
 		level = 1
@@ -39,7 +40,7 @@ func mapLevel(level int) zstd.EncoderLevel {
 	return zstd.EncoderLevelFromZstd(level)
 }
 
-// BatchDecompress decompress a batch archive file
+// BatchDecompress expands a zstd-compressed tar archive into dstDir.
 func BatchDecompress(archiveFile, dstDir string) error {
 	// Open archive file
 	f, err := os.Open(archiveFile)

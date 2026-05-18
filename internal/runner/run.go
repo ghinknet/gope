@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Run an executable with passthrough
+// Run starts a child process with IO and signal passthrough.
 func Run(envs []string, binaryPath string, args []string, workingDir string, quiet bool) (int, error) {
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Dir = workingDir
@@ -31,6 +31,7 @@ func Run(envs []string, binaryPath string, args []string, workingDir string, qui
 	return exitCode(cmd.Wait())
 }
 
+// startSignalForwarding forwards OS signals to the child.
 func startSignalForwarding(cmd *exec.Cmd) func() {
 	if len(forwardSignals) == 0 {
 		return func() {}
@@ -56,17 +57,18 @@ func startSignalForwarding(cmd *exec.Cmd) func() {
 	}
 }
 
+// exitCode normalizes process exit status to an int.
 func exitCode(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode(), nil
 	}
 	return -1, err
 }
 
+// isTerminationSignal returns true for signals that should trigger a forced kill.
 func isTerminationSignal(sig os.Signal) bool {
 	switch sig {
 	case os.Interrupt, syscall.SIGTERM, syscall.SIGINT:

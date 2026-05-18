@@ -25,6 +25,7 @@ func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	return io.Copy(writer, src)
 }
 
+// mapLevel converts 1-10 into gzip's level range.
 func mapLevel(level int) (int, error) {
 	if level < 1 || level > 10 {
 		return 0, fmt.Errorf("compression level must be 1-10")
@@ -34,4 +35,3 @@ func mapLevel(level int) (int, error) {
 	}
 	return level, nil
 }
-

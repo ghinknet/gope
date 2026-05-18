@@ -11,15 +11,17 @@ import (
 )
 
 func main() {
+	// Build the embedded decompressor archive.
 	if err := run(); err != nil {
-		fmt.Println("error packing decompressor:", err)
+		fmt.Printf("[error] packer: %v\n", err)
 	}
 }
 
+// run packs the decompressor source tree into a zstd tar archive.
 func run() error {
-	outFile, err := os.Create("decompressorSourceCode")
+	outFile, err := os.Create("decomp_src")
 	if err != nil {
-		return fmt.Errorf("error creating output file: %w", err)
+		return fmt.Errorf("create output file: %w", err)
 	}
 	defer func(outFile *os.File) {
 		if e := outFile.Close(); e != nil {
@@ -29,7 +31,7 @@ func run() error {
 
 	zstdWriter, err := zstd.NewWriter(outFile)
 	if err != nil {
-		return fmt.Errorf("error creating zstd compressor: %w", err)
+		return fmt.Errorf("create zstd compressor: %w", err)
 	}
 	defer func(zstdWriter *zstd.Encoder) {
 		if e := zstdWriter.Close(); e != nil {
@@ -44,6 +46,7 @@ func run() error {
 		}
 	}(tarWriter)
 
+	// Walk the decompressor source tree and add files to the archive.
 	return filepath.Walk("decompressor", func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

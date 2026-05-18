@@ -10,12 +10,14 @@ import (
 	"sync"
 )
 
+// Platform describes a GOOS/GOARCH build target.
 type Platform struct {
 	GOOS   string
 	GOARCH string
 }
 
 func main() {
+	// Flags and basic setup.
 	var namePrefix string
 	var parallel int
 	flag.StringVar(&namePrefix, "n", "GoPE", "Prefix of file")
@@ -23,51 +25,57 @@ func main() {
 	flag.Parse()
 
 	if err := resetWorkspace(); err != nil {
-		fmt.Printf("❌ %v\n", err)
+		fmt.Printf("[error] %v\n", err)
 		return
 	}
 
 	if err := runPacker(); err != nil {
-		fmt.Printf("❌ Failed to run packer: %v\n", err)
+		fmt.Printf("[error] packer failed: %v\n", err)
 		return
 	}
 
 	if err := os.MkdirAll("dists", 0755); err != nil {
-		fmt.Printf("❌ Failed to create dists: %v\n", err)
+		fmt.Printf("[error] create dists: %v\n", err)
 		return
 	}
 
-	os.Setenv("CGO_ENABLED", "0")
+	if err := os.Setenv("CGO_ENABLED", "0"); err != nil {
+		fmt.Printf("[error] set env: %v\n", err)
+		return
+	}
 
 	platforms, err := getPlatforms()
 	if err != nil {
-		fmt.Printf("❌ Get support platforms: %v\n", err)
+		fmt.Printf("[error] list platforms: %v\n", err)
 		return
 	}
 
-	fmt.Printf("🚀 Start compile with prefix: %s\n", namePrefix)
-	fmt.Printf("📦 Dest platforms: %d\n", len(platforms))
-	fmt.Printf("⚡ Parallel tasks: %d\n", parallel)
+	fmt.Printf("[info] build prefix: %s\n", namePrefix)
+	fmt.Printf("[info] platforms: %d\n", len(platforms))
+	fmt.Printf("[info] parallel: %d\n", parallel)
 
+	// Resolve build targets and run the build in parallel.
 	compileAll(platforms, namePrefix, parallel)
 
-	fmt.Printf("\n🎉 All compile tasks done! Output file under dists.\n")
+	fmt.Printf("[info] build finished\n")
 
-	if err = os.RemoveAll("decompressorSourceCode"); err != nil {
-		fmt.Printf("❌ Failed to remove decompressorSourceCode: %v\n", err)
+	if err = os.RemoveAll("decomp_src"); err != nil {
+		fmt.Printf("[warn] cleanup decomp_src: %v\n", err)
 	}
 }
 
+// resetWorkspace removes previous outputs and embedded artefacts.
 func resetWorkspace() error {
 	if err := os.RemoveAll("dists"); err != nil {
 		return fmt.Errorf("failed to remove dists: %w", err)
 	}
-	if err := os.RemoveAll("decompressorSourceCode"); err != nil {
-		return fmt.Errorf("failed to remove decompressorSourceCode: %w", err)
+	if err := os.RemoveAll("decomp_src"); err != nil {
+		return fmt.Errorf("failed to remove decomp_src: %w", err)
 	}
 	return nil
 }
 
+// runPacker generates the embedded decompressor archive.
 func runPacker() error {
 	cmd := exec.Command("go", "run", "./packer/main.go")
 	output, err := cmd.CombinedOutput()
@@ -77,6 +85,7 @@ func runPacker() error {
 	return nil
 }
 
+// getPlatforms loads supported GOOS/GOARCH pairs from the Go toolchain.
 func getPlatforms() ([]Platform, error) {
 	cmd := exec.Command("go", "tool", "dist", "list")
 	output, err := cmd.Output()
@@ -105,6 +114,7 @@ func getPlatforms() ([]Platform, error) {
 	return platforms, nil
 }
 
+// compileAll builds all target platforms with a concurrency limit.
 func compileAll(platforms []Platform, namePrefix string, parallel int) {
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, parallel)
@@ -124,6 +134,7 @@ func compileAll(platforms []Platform, namePrefix string, parallel int) {
 	wg.Wait()
 }
 
+// compilePlatform builds a single target and writes to dists/.
 func compilePlatform(platform Platform, namePrefix string) {
 	suffix := ""
 	if platform.GOOS == "windows" {
@@ -132,7 +143,7 @@ func compilePlatform(platform Platform, namePrefix string) {
 
 	outputFile := fmt.Sprintf("dists/%s-%s-%s%s", namePrefix, platform.GOOS, platform.GOARCH, suffix)
 
-	fmt.Printf("🛠  Compiling: %s/%s\n", platform.GOOS, platform.GOARCH)
+	fmt.Printf("[info] build %s/%s\n", platform.GOOS, platform.GOARCH)
 
 	cmd := exec.Command("go", "build",
 		"-ldflags=-s -w",
@@ -148,8 +159,8 @@ func compilePlatform(platform Platform, namePrefix string) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("❌ Failed: %s/%s - %v\n%s", platform.GOOS, platform.GOARCH, err, string(output))
-	} else {
-		fmt.Printf("✅ Done: %s/%s → %s\n", platform.GOOS, platform.GOARCH, outputFile)
+		fmt.Printf("[error] build %s/%s: %v\n%s", platform.GOOS, platform.GOARCH, err, string(output))
+		return
 	}
+	fmt.Printf("[ok] build %s/%s -> %s\n", platform.GOOS, platform.GOARCH, outputFile)
 }

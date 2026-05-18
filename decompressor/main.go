@@ -12,6 +12,8 @@ import (
 	"go.gh.ink/gope/decompressor/internal/temp"
 )
 
+// Embedded compressed payload produced by the packer.
+//
 //go:embed compressed
 var embeddedExecutable []byte
 
@@ -38,11 +40,14 @@ const (
 	modeReplace
 )
 
+// Build-time mode injected by the packer (mask or replace).
 var buildMode = "mask"
 
 func run() (int, error) {
+	// Pass through all arguments to the wrapped program.
 	args := os.Args[1:]
 
+	// Resolve run mode from build-time configuration.
 	mode := modeMask
 	if buildMode == "replace" {
 		mode = modeReplace
@@ -94,6 +99,7 @@ func executablePath() (string, string, error) {
 	return resolved, filepath.Dir(resolved), nil
 }
 
+// prepareExecutable materializes the real program using the chosen mode.
 func prepareExecutable(tempPath string, exePath string, outputDir string, mode runMode) (string, func(), error) {
 	if mode == modeReplace {
 		binaryPath, err := decompressToPath(tempPath, outputDir, exePath)
@@ -112,6 +118,7 @@ func prepareExecutable(tempPath string, exePath string, outputDir string, mode r
 	}, nil
 }
 
+// decompressToTemp writes a temporary executable in the output directory.
 func decompressToTemp(tempPath string, outputDir string) (string, error) {
 	outFile, binaryPath, err := createOutputExecutable(outputDir)
 	if err != nil {
@@ -128,6 +135,7 @@ func decompressToTemp(tempPath string, outputDir string) (string, error) {
 	return binaryPath, nil
 }
 
+// decompressToPath replaces the wrapper with the decompressed payload.
 func decompressToPath(tempPath string, outputDir string, targetPath string) (string, error) {
 	outFile, tempBinaryPath, err := createOutputExecutable(outputDir)
 	if err != nil {
@@ -147,6 +155,7 @@ func decompressToPath(tempPath string, outputDir string, targetPath string) (str
 	return targetPath, nil
 }
 
+// decompressExecutable expands the embedded payload into the given file.
 func decompressExecutable(tempPath string, outFile *os.File) error {
 	if err := releaseEmbedded(tempPath); err != nil {
 		return fmt.Errorf("error releasing executable: %w", err)
@@ -176,6 +185,7 @@ func decompressExecutable(tempPath string, outFile *os.File) error {
 	return nil
 }
 
+// createOutputExecutable allocates the temp executable path.
 func createOutputExecutable(outputDir string) (*os.File, string, error) {
 	pattern := ".gope-exec-*"
 	if runtime.GOOS == "windows" {

@@ -8,7 +8,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Decompress decompresses the source zstd stream
+// Decompress decompresses the source zstd stream.
 func Decompress(src io.Reader, dst io.Writer) (int64, error) {
 	// Create zstd decompressor
 	decoder, err := zstd.NewReader(src)
