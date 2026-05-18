@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.gh.ink/gope/internal/compress/gzip"
 	"go.gh.ink/gope/internal/compress/zstd"
-	"go.gh.ink/gope/internal/constant"
+	"go.gh.ink/gope/internal/meta"
 	"go.gh.ink/gope/internal/runner"
 	"go.gh.ink/gope/internal/temp"
 	"go.gh.ink/toolbox/expr"
@@ -33,12 +33,12 @@ func releaseEmbedded(temp string) error {
 
 // CLI configuration.
 var rootCmd = &cobra.Command{
-	Use: constant.Name,
+	Use: meta.Name,
 	Long: `Go Packer for Executable
 A go-based cross platform binary compressor.
 
 "Well. Your physical education teacher is not sick :D"`,
-	Version: constant.VersionText,
+	Version: meta.VersionText,
 	RunE:    Runner,
 }
 
@@ -169,11 +169,11 @@ func validateFlags() error {
 	if input == "" {
 		return fmt.Errorf("input file is required")
 	}
-	if !slices.Contains(constant.SupportedMethods, method) {
+	if !slices.Contains(meta.SupportedMethods, method) {
 		return fmt.Errorf("method %s is not supported", method)
 	}
-	if !slices.Contains(constant.SupportedPlatforms, system+"/"+arch) {
-		return fmt.Errorf("unsupported platform: %s/%s", system, arch)
+	if !slices.Contains(meta.SupportedPlatforms, system+"/"+arch) {
+		log.Printf("[warn] unsupported platform %s/%s (untested)\n", system, arch)
 	}
 	if runMode != "mask" && runMode != "replace" {
 		return fmt.Errorf("unsupported run mode: %s", runMode)
@@ -363,4 +363,3 @@ func tidyModule(tempDir string) error {
 	}
 	return nil
 }
-
