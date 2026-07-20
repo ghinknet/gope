@@ -1,4 +1,4 @@
-//go:build zstd
+//go:build zstd || (!gzip && !zstd)
 
 package decompress
 

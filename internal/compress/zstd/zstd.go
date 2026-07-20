@@ -2,9 +2,9 @@ package zstd
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,18 +15,27 @@ import (
 // Compress compresses the source stream.
 func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	// Create zstd compressor
-	encoder, err := zstd.NewWriter(dst, zstd.WithEncoderLevel(mapLevel(level)))
+	counted := &countingWriter{writer: dst}
+	encoder, err := zstd.NewWriter(counted, zstd.WithEncoderLevel(mapLevel(level)))
 	if err != nil {
 		return 0, err
 	}
-	defer func(encoder *zstd.Encoder) {
-		if e := encoder.Close(); err != nil {
-			panic(e)
-		}
-	}(encoder)
 
 	// Compress
-	return io.Copy(encoder, src)
+	_, copyErr := io.Copy(encoder, src)
+	closeErr := encoder.Close()
+	return counted.written, errors.Join(copyErr, closeErr)
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	written int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.written += int64(n)
+	return n, err
 }
 
 // mapLevel converts a 1-10 level into a zstd encoder level.
@@ -47,11 +56,7 @@ func BatchDecompress(archiveFile, dstDir string) error {
 	if err != nil {
 		return err
 	}
-	defer func(f *os.File) {
-		if e := f.Close(); e != nil {
-			panic(e)
-		}
-	}(f)
+	defer func() { _ = f.Close() }()
 
 	// Create zstd reader
 	zstdReader, err := zstd.NewReader(f)
@@ -84,6 +89,9 @@ func BatchDecompress(archiveFile, dstDir string) error {
 		}(targetPath, dstDir)) {
 			return fmt.Errorf("invalid path: %s", targetPath)
 		}
+		if err = rejectSymlinkPath(dstDir, targetPath); err != nil {
+			return err
+		}
 
 		// Process file type
 		switch header.Typeflag {
@@ -101,28 +109,47 @@ func BatchDecompress(archiveFile, dstDir string) error {
 			if err != nil {
 				return err
 			}
-			if _, err = io.Copy(outFile, tarReader); err != nil {
-				err = outFile.Close()
-				if err != nil {
-					return err
-				}
-				return err
-			}
-			err = outFile.Close()
-			if err != nil {
+			_, copyErr := io.Copy(outFile, tarReader)
+			closeErr := outFile.Close()
+			if err = errors.Join(copyErr, closeErr); err != nil {
+				_ = os.Remove(targetPath)
 				return err
 			}
 			// Set file permissions
 			err = os.Chmod(targetPath, os.FileMode(header.Mode))
 			if err != nil {
+				_ = os.Remove(targetPath)
 				return err
 			}
-		case tar.TypeSymlink: // Symbolic link
-			if err = os.Symlink(header.Linkname, targetPath); err != nil {
-				return err
-			}
+		case tar.TypeSymlink:
+			return fmt.Errorf("symbolic links are not supported in archive: %s", header.Name)
 		default:
-			log.Printf("Skipping unsupported type: %c in %s\n", header.Typeflag, header.Name)
+			return fmt.Errorf("unsupported archive entry type %q in %s", header.Typeflag, header.Name)
+		}
+	}
+	return nil
+}
+
+func rejectSymlinkPath(baseDir, targetPath string) error {
+	rel, err := filepath.Rel(baseDir, targetPath)
+	if err != nil {
+		return err
+	}
+	current := filepath.Clean(baseDir)
+	paths := append([]string{current}, strings.Split(rel, string(filepath.Separator))...)
+	for index, part := range paths {
+		if index > 0 {
+			current = filepath.Join(current, part)
+		}
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symbolic link in extraction path: %s", current)
 		}
 	}
 	return nil

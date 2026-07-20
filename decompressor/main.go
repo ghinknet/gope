@@ -1,34 +1,28 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 
-	"go.gh.ink/gope/decompressor/internal/decompress"
-	"go.gh.ink/gope/decompressor/internal/runner"
-	"go.gh.ink/gope/decompressor/internal/temp"
+	"gope/decompressor/internal/decompress"
+	"gope/decompressor/internal/runner"
 )
 
-// Embedded compressed payload produced by the packer.
+// Embedded compressed payload written by gope at pack time.
 //
 //go:embed compressed
 var embeddedExecutable []byte
 
-// ReleaseEmbedded releases the embedded compressed executable
-func releaseEmbedded(temp string) error {
-	return os.WriteFile(
-		filepath.Join(temp, "compressed"), embeddedExecutable, 0644,
-	)
-}
-
 func main() {
 	exitCode, err := run()
 	if err != nil {
-		fmt.Println(err)
-		return
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	os.Exit(exitCode)
 }
@@ -40,7 +34,7 @@ const (
 	modeReplace
 )
 
-// Build-time mode injected by the packer (mask or replace).
+// Build-time mode injected by gope at pack time (mask or replace).
 var buildMode = "mask"
 
 func run() (int, error) {
@@ -48,31 +42,24 @@ func run() (int, error) {
 	args := os.Args[1:]
 
 	// Resolve run mode from build-time configuration.
-	mode := modeMask
-	if buildMode == "replace" {
-		mode = modeReplace
-	}
-	if mode == modeReplace && runtime.GOOS == "windows" {
-		mode = modeMask
-	}
-
-	exePath, workDir, err := executablePath()
+	mode, err := parseRunMode(buildMode)
 	if err != nil {
 		return 0, err
 	}
-
-	// Make temp dir
-	mkTemp, err := temp.MkTemp()
-	if err != nil {
-		return 0, fmt.Errorf("error making temp dir: %w", err)
+	if mode == modeReplace && runtime.GOOS == "windows" {
+		return 0, fmt.Errorf("replace mode is not supported on windows")
 	}
-	defer func(mkTemp temp.Dir) {
-		if e := mkTemp.Release(); e != nil {
-			panic(e)
-		}
-	}(mkTemp)
 
-	binaryPath, cleanup, err := prepareExecutable(mkTemp.Path(), exePath, workDir, mode)
+	exePath, exeDir, err := executablePath()
+	if err != nil {
+		return 0, err
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return 0, fmt.Errorf("error getting working directory: %w", err)
+	}
+
+	binaryPath, cleanup, err := prepareExecutable(exePath, exeDir, mode)
 	if err != nil {
 		return 0, err
 	}
@@ -87,6 +74,17 @@ func run() (int, error) {
 	return code, nil
 }
 
+func parseRunMode(value string) (runMode, error) {
+	switch value {
+	case "mask":
+		return modeMask, nil
+	case "replace":
+		return modeReplace, nil
+	default:
+		return modeMask, fmt.Errorf("invalid build mode: %s", value)
+	}
+}
+
 func executablePath() (string, string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -99,49 +97,59 @@ func executablePath() (string, string, error) {
 	return resolved, filepath.Dir(resolved), nil
 }
 
-// prepareExecutable materializes the real program using the chosen mode.
-func prepareExecutable(tempPath string, exePath string, outputDir string, mode runMode) (string, func(), error) {
+// prepareExecutable materializes the real program using the chosen mode and
+// returns a cleanup function that removes any file created for mask mode.
+func prepareExecutable(exePath string, exeDir string, mode runMode) (string, func(), error) {
 	if mode == modeReplace {
-		binaryPath, err := decompressToPath(tempPath, outputDir, exePath)
-		if err != nil {
-			return "", func() {}, err
-		}
-		return binaryPath, func() {}, nil
+		binaryPath, err := decompressToPath(exeDir, exePath)
+		return binaryPath, func() {}, err
 	}
 
-	binaryPath, err := decompressToTemp(tempPath, outputDir)
+	// Mask mode: write the real program next to the wrapper so that programs
+	// which locate themselves through os.Executable resolve to the packed
+	// file's directory rather than a private temp directory.
+	binaryPath, err := decompressBeside(exeDir)
 	if err != nil {
 		return "", func() {}, err
 	}
-	return binaryPath, func() {
-		_ = os.Remove(binaryPath)
-	}, nil
+	return binaryPath, func() { _ = os.Remove(binaryPath) }, nil
 }
 
-// decompressToTemp writes a temporary executable in the output directory.
-func decompressToTemp(tempPath string, outputDir string) (string, error) {
-	outFile, binaryPath, err := createOutputExecutable(outputDir)
+// decompressBeside writes the real executable into dir (the wrapper's own
+// directory) so the running program shares the wrapper's location.
+func decompressBeside(dir string) (binaryPath string, retErr error) {
+	outFile, tempBinaryPath, err := createOutputExecutable(dir)
 	if err != nil {
 		return "", err
 	}
-	if err = decompressExecutable(tempPath, outFile); err != nil {
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(tempBinaryPath)
+		}
+	}()
+	if err = decompressExecutable(outFile); err != nil {
 		return "", err
 	}
 	if runtime.GOOS != "windows" {
-		if err = os.Chmod(binaryPath, 0755); err != nil {
+		if err = os.Chmod(tempBinaryPath, 0755); err != nil {
 			return "", fmt.Errorf("setting executable permission failed: %w", err)
 		}
 	}
-	return binaryPath, nil
+	return tempBinaryPath, nil
 }
 
 // decompressToPath replaces the wrapper with the decompressed payload.
-func decompressToPath(tempPath string, outputDir string, targetPath string) (string, error) {
+func decompressToPath(outputDir string, targetPath string) (binaryPath string, retErr error) {
 	outFile, tempBinaryPath, err := createOutputExecutable(outputDir)
 	if err != nil {
 		return "", err
 	}
-	if err = decompressExecutable(tempPath, outFile); err != nil {
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(tempBinaryPath)
+		}
+	}()
+	if err = decompressExecutable(outFile); err != nil {
 		return "", err
 	}
 	if runtime.GOOS != "windows" {
@@ -156,32 +164,12 @@ func decompressToPath(tempPath string, outputDir string, targetPath string) (str
 }
 
 // decompressExecutable expands the embedded payload into the given file.
-func decompressExecutable(tempPath string, outFile *os.File) error {
-	if err := releaseEmbedded(tempPath); err != nil {
-		return fmt.Errorf("error releasing executable: %w", err)
-	}
-
-	compressedBinaryPath := filepath.Join(tempPath, "compressed")
-	inFile, err := os.Open(compressedBinaryPath)
-	if err != nil {
-		return fmt.Errorf("error opening compressed file: %w", err)
-	}
-	defer func(inFile *os.File) {
-		if e := inFile.Close(); e != nil {
-			panic(e)
-		}
-	}(inFile)
-
-	defer func(outFile *os.File) {
-		if e := outFile.Close(); e != nil {
-			panic(e)
-		}
-	}(outFile)
-
-	if _, err = decompress.Decompress(inFile, outFile); err != nil {
+func decompressExecutable(outFile *os.File) error {
+	_, decompressErr := decompress.Decompress(bytes.NewReader(embeddedExecutable), outFile)
+	closeErr := outFile.Close()
+	if err := errors.Join(decompressErr, closeErr); err != nil {
 		return fmt.Errorf("error decompressing executable: %w", err)
 	}
-
 	return nil
 }
 

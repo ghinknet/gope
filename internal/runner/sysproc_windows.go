@@ -11,9 +11,8 @@ import (
 // Signals forwarded to the child process on Windows.
 var forwardSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 
-// applySysProcAttr creates a new process group for the child.
+// applySysProcAttr keeps the child attached to the current console.
 func applySysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
 
 // forwardSignal forwards a signal to the child.

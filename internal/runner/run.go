@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,8 +17,9 @@ func Run(envs []string, binaryPath string, args []string, workingDir string, qui
 	cmd.Stdin = os.Stdin
 	if !quiet {
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
 	}
+	// Diagnostics remain visible in quiet mode so command failures are actionable.
+	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), envs...)
 	applySysProcAttr(cmd)
 
@@ -26,9 +28,10 @@ func Run(envs []string, binaryPath string, args []string, workingDir string, qui
 	}
 
 	stopForward := startSignalForwarding(cmd)
-	defer stopForward()
+	waitErr := cmd.Wait()
+	stopForward()
 
-	return exitCode(cmd.Wait())
+	return exitCode(waitErr)
 }
 
 // startSignalForwarding forwards OS signals to the child.
@@ -39,21 +42,42 @@ func startSignalForwarding(cmd *exec.Cmd) func() {
 	// Buffer prevents missed signals during bursts.
 	sigChan := make(chan os.Signal, 4)
 	signal.Notify(sigChan, forwardSignals...)
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	var timerMu sync.Mutex
+	var killTimer *time.Timer
 
 	go func() {
-		for sig := range sigChan {
-			_ = forwardSignal(cmd, sig)
-			if isTerminationSignal(sig) {
-				time.AfterFunc(5*time.Second, func() {
-					forceKill(cmd)
-				})
+		for {
+			select {
+			case sig := <-sigChan:
+				_ = forwardSignal(cmd, sig)
+				if isTerminationSignal(sig) {
+					timerMu.Lock()
+					if killTimer != nil {
+						killTimer.Stop()
+					}
+					killTimer = time.AfterFunc(5*time.Second, func() {
+						forceKill(cmd)
+					})
+					timerMu.Unlock()
+				}
+			case <-done:
+				return
 			}
 		}
 	}()
 
 	return func() {
-		signal.Stop(sigChan)
-		close(sigChan)
+		stopOnce.Do(func() {
+			signal.Stop(sigChan)
+			close(done)
+			timerMu.Lock()
+			if killTimer != nil {
+				killTimer.Stop()
+			}
+			timerMu.Unlock()
+		})
 	}
 }
 
@@ -63,7 +87,7 @@ func exitCode(err error) (int, error) {
 		return 0, nil
 	}
 	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
-		return exitErr.ExitCode(), nil
+		return platformExitCode(exitErr), nil
 	}
 	return -1, err
 }

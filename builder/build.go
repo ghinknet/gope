@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"gope/internal/meta"
 )
 
 // Platform describes a GOOS/GOARCH build target.
@@ -17,70 +20,65 @@ type Platform struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "[error] %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// Flags and basic setup.
 	var namePrefix string
+	var version string
 	var parallel int
 	flag.StringVar(&namePrefix, "n", "GoPE", "Prefix of file")
-	flag.IntVar(&parallel, "p", runtime.NumCPU()-1, "Number of parallel tasks (default: CPU count)")
+	flag.StringVar(&version, "v", "", "Semantic version to inject and embed in artifact names (e.g. v0.0.1)")
+	flag.IntVar(&parallel, "p", defaultParallelism(), "Number of parallel tasks")
 	flag.Parse()
-
-	if err := resetWorkspace(); err != nil {
-		fmt.Printf("[error] %v\n", err)
-		return
-	}
-
-	if err := runPacker(); err != nil {
-		fmt.Printf("[error] packer failed: %v\n", err)
-		return
-	}
-
-	if err := os.MkdirAll("dists", 0755); err != nil {
-		fmt.Printf("[error] create dists: %v\n", err)
-		return
-	}
-
-	if err := os.Setenv("CGO_ENABLED", "0"); err != nil {
-		fmt.Printf("[error] set env: %v\n", err)
-		return
+	if parallel < 1 {
+		return fmt.Errorf("parallel task count must be at least 1")
 	}
 
 	platforms, err := getPlatforms()
 	if err != nil {
-		fmt.Printf("[error] list platforms: %v\n", err)
-		return
+		return fmt.Errorf("list platforms: %w", err)
+	}
+
+	if err = resetWorkspace(); err != nil {
+		return err
+	}
+
+	if err = os.MkdirAll("dists", 0755); err != nil {
+		return fmt.Errorf("create dists: %w", err)
 	}
 
 	fmt.Printf("[info] build prefix: %s\n", namePrefix)
+	if version != "" {
+		fmt.Printf("[info] version: %s\n", version)
+	}
 	fmt.Printf("[info] platforms: %d\n", len(platforms))
 	fmt.Printf("[info] parallel: %d\n", parallel)
 
 	// Resolve build targets and run the build in parallel.
-	compileAll(platforms, namePrefix, parallel)
+	if err = compileAll(platforms, namePrefix, version, parallel); err != nil {
+		return err
+	}
 
 	fmt.Printf("[info] build finished\n")
-
-	if err = os.RemoveAll("decomp_src"); err != nil {
-		fmt.Printf("[warn] cleanup decomp_src: %v\n", err)
-	}
-}
-
-// resetWorkspace removes previous outputs and embedded artefacts.
-func resetWorkspace() error {
-	if err := os.RemoveAll("dists"); err != nil {
-		return fmt.Errorf("failed to remove dists: %w", err)
-	}
-	if err := os.RemoveAll("decomp_src"); err != nil {
-		return fmt.Errorf("failed to remove decomp_src: %w", err)
-	}
 	return nil
 }
 
-// runPacker generates the embedded decompressor archive.
-func runPacker() error {
-	cmd := exec.Command("go", "run", "./packer/main.go")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v\n%s", err, string(output))
+func defaultParallelism() int {
+	if runtime.NumCPU() <= 1 {
+		return 1
+	}
+	return runtime.NumCPU() - 1
+}
+
+// resetWorkspace removes previous outputs.
+func resetWorkspace() error {
+	if err := os.RemoveAll("dists"); err != nil {
+		return fmt.Errorf("failed to remove dists: %w", err)
 	}
 	return nil
 }
@@ -88,9 +86,9 @@ func runPacker() error {
 // getPlatforms loads supported GOOS/GOARCH pairs from the Go toolchain.
 func getPlatforms() ([]Platform, error) {
 	cmd := exec.Command("go", "tool", "dist", "list")
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	var platforms []Platform
@@ -104,7 +102,7 @@ func getPlatforms() ([]Platform, error) {
 
 		goos, goarch := parts[0], parts[1]
 
-		if goos == "ios" || goos == "android" || goos == "js" || goos == "wasip1" || goos == "plan9" {
+		if !meta.IsSupportedSystem(goos) {
 			continue
 		}
 
@@ -115,9 +113,19 @@ func getPlatforms() ([]Platform, error) {
 }
 
 // compileAll builds all target platforms with a concurrency limit.
-func compileAll(platforms []Platform, namePrefix string, parallel int) {
+func compileAll(platforms []Platform, namePrefix string, version string, parallel int) error {
+	return compileAllWith(platforms, namePrefix, parallel, func(p Platform, prefix string) error {
+		return compilePlatform(p, prefix, version)
+	})
+}
+
+func compileAllWith(platforms []Platform, namePrefix string, parallel int, compiler func(Platform, string) error) error {
+	if parallel < 1 {
+		return fmt.Errorf("parallel task count must be at least 1")
+	}
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, parallel)
+	errorsChan := make(chan error, len(platforms))
 
 	for _, platform := range platforms {
 		wg.Add(1)
@@ -127,26 +135,44 @@ func compileAll(platforms []Platform, namePrefix string, parallel int) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
 
-			compilePlatform(p, namePrefix)
+			if err := compiler(p, namePrefix); err != nil {
+				errorsChan <- err
+			}
 		}(platform)
 	}
 
 	wg.Wait()
+	close(errorsChan)
+	var buildErrors []error
+	for err := range errorsChan {
+		buildErrors = append(buildErrors, err)
+	}
+	return errors.Join(buildErrors...)
 }
 
 // compilePlatform builds a single target and writes to dists/.
-func compilePlatform(platform Platform, namePrefix string) {
+func compilePlatform(platform Platform, namePrefix string, version string) error {
 	suffix := ""
 	if platform.GOOS == "windows" {
 		suffix = ".exe"
 	}
 
-	outputFile := fmt.Sprintf("dists/%s-%s-%s%s", namePrefix, platform.GOOS, platform.GOARCH, suffix)
+	// Artifact names embed the version when provided: GoPE-v0.0.1-linux-amd64.
+	name := namePrefix
+	if version != "" {
+		name = fmt.Sprintf("%s-%s", namePrefix, version)
+	}
+	outputFile := fmt.Sprintf("dists/%s-%s-%s%s", name, platform.GOOS, platform.GOARCH, suffix)
 
 	fmt.Printf("[info] build %s/%s\n", platform.GOOS, platform.GOARCH)
 
+	ldflags := "-s -w"
+	if version != "" {
+		ldflags += " -X gope/internal/meta.Version=" + version
+	}
+
 	cmd := exec.Command("go", "build",
-		"-ldflags=-s -w",
+		"-ldflags="+ldflags,
 		"-trimpath",
 		"-o", outputFile,
 		".")
@@ -159,8 +185,8 @@ func compilePlatform(platform Platform, namePrefix string) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[error] build %s/%s: %v\n%s", platform.GOOS, platform.GOARCH, err, string(output))
-		return
+		return fmt.Errorf("build %s/%s: %w\n%s", platform.GOOS, platform.GOARCH, err, string(output))
 	}
 	fmt.Printf("[ok] build %s/%s -> %s\n", platform.GOOS, platform.GOARCH, outputFile)
+	return nil
 }

@@ -1,34 +1,67 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 
+	"gope/internal/compress/gzip"
+	"gope/internal/compress/zstd"
+	"gope/internal/meta"
+	"gope/internal/runner"
+	"gope/internal/temp"
+
 	"github.com/spf13/cobra"
-	"go.gh.ink/gope/internal/compress/gzip"
-	"go.gh.ink/gope/internal/compress/zstd"
-	"go.gh.ink/gope/internal/meta"
-	"go.gh.ink/gope/internal/runner"
-	"go.gh.ink/gope/internal/temp"
 	"go.gh.ink/toolbox/expr"
 )
 
-// Embedded decompressor source archive used to build the runtime wrapper.
+// Embedded decompressor source tree used to build the runtime wrapper.
 //
-//go:embed decomp_src
-var embeddedDecompressor []byte
+//go:embed decompressor
+var embeddedDecompressor embed.FS
 
-// ReleaseEmbedded releases the embedded compressed executable
+// releaseEmbedded releases the embedded decompressor module into temp.
 func releaseEmbedded(temp string) error {
-	return os.WriteFile(
-		filepath.Join(temp, "decomp_src"), embeddedDecompressor, 0644,
-	)
+	return fs.WalkDir(embeddedDecompressor, "decompressor", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel("decompressor", path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		// The payload is generated for every packing operation and must never
+		// be copied from the source placeholder.
+		if filepath.ToSlash(rel) == "compressed" {
+			return nil
+		}
+		if filepath.ToSlash(rel) == "go.mod.template" {
+			rel = "go.mod"
+		}
+		target := filepath.Join(temp, filepath.FromSlash(rel))
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		data, err := embeddedDecompressor.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err = os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0644)
+	})
 }
 
 // CLI configuration.
@@ -38,8 +71,11 @@ var rootCmd = &cobra.Command{
 A go-based cross platform binary compressor.
 
 "Well. Your physical education teacher is not sick :D"`,
-	Version: meta.VersionText,
-	RunE:    Runner,
+	Version:       meta.Version,
+	RunE:          Runner,
+	Args:          cobra.NoArgs,
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 // CLI flags.
@@ -77,18 +113,22 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
 // Runner
-// Main pack pipeline: validate -> compress -> unpack decompressor -> build wrapper -> optional UPX -> move output.
+// Main pack pipeline: validate -> compress -> release decompressor -> build wrapper -> optional UPX -> move output.
 func Runner(cmd *cobra.Command, args []string) error {
 	return run()
 }
 
-func run() error {
+func run() (retErr error) {
 	if err := validateFlags(); err != nil {
+		return err
+	}
+	if err := validateTargetPlatform(); err != nil {
 		return err
 	}
 
@@ -101,48 +141,29 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("error opening input file: %w", err)
 	}
-	defer func(inFile *os.File) {
-		if e := inFile.Close(); e != nil {
-			panic(e)
-		}
-	}(inFile)
 
 	mkTemp, err := temp.MkTemp()
 	if err != nil {
 		return fmt.Errorf("error making temp dir: %w", err)
 	}
-	defer func(mkTemp temp.Dir) {
-		if e := mkTemp.Release(); e != nil {
-			panic(e)
-		}
-	}(mkTemp)
+	defer func() {
+		retErr = errors.Join(retErr, mkTemp.Release())
+	}()
 	if !quiet {
 		log.Println("Made temp dir:", mkTemp.Path())
 	}
 
-	if err = compressInput(inFile, mkTemp.Path()); err != nil {
+	compressErr := compressInput(inFile, mkTemp.Path())
+	closeErr := inFile.Close()
+	if err = errors.Join(compressErr, closeErr); err != nil {
 		return err
 	}
 
 	if err = releaseEmbedded(mkTemp.Path()); err != nil {
-		return fmt.Errorf("error releasing embedded resource code: %w", err)
+		return fmt.Errorf("error releasing embedded decompressor source: %w", err)
 	}
 	if !quiet {
-		log.Println("Released embedded resource code")
-	}
-
-	if err = zstd.BatchDecompress(
-		filepath.Join(mkTemp.Path(), "decomp_src"),
-		mkTemp.Path(),
-	); err != nil {
-		return fmt.Errorf("error decompressing decompressor: %w", err)
-	}
-	if !quiet {
-		log.Println("Decompressed decompressor")
-	}
-
-	if err = tidyModule(mkTemp.Path()); err != nil {
-		return err
+		log.Println("Released embedded decompressor source")
 	}
 
 	if err = buildDecompressor(mkTemp.Path()); err != nil {
@@ -153,11 +174,12 @@ func run() error {
 		return err
 	}
 
-	if err = moveOutput(mkTemp.Path(), workDir); err != nil {
+	outputPath, err := moveOutput(mkTemp.Path(), workDir)
+	if err != nil {
 		return err
 	}
 
-	if err = chmodOutputIfNeeded(workDir); err != nil {
+	if err = chmodOutputIfNeeded(outputPath); err != nil {
 		return err
 	}
 
@@ -172,14 +194,11 @@ func validateFlags() error {
 	if !slices.Contains(meta.SupportedMethods, method) {
 		return fmt.Errorf("method %s is not supported", method)
 	}
-	if !slices.Contains(meta.SupportedPlatforms, system+"/"+arch) {
-		log.Printf("[warn] unsupported platform %s/%s (untested)\n", system, arch)
-	}
 	if runMode != "mask" && runMode != "replace" {
 		return fmt.Errorf("unsupported run mode: %s", runMode)
 	}
-	if system == "windows" {
-		runMode = "mask"
+	if system == "windows" && runMode == "replace" {
+		return fmt.Errorf("replace mode is not supported on windows")
 	}
 	if level < 1 || level > 10 {
 		return fmt.Errorf("compression level must be 1-10")
@@ -190,18 +209,28 @@ func validateFlags() error {
 	return nil
 }
 
+func validateTargetPlatform() error {
+	if !meta.IsSupportedSystem(system) {
+		return fmt.Errorf("target system %s is not supported by GoPE", system)
+	}
+	cmd := exec.Command(goPath, "tool", "dist", "list")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("error listing Go target platforms: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	target := system + "/" + arch
+	if !slices.Contains(strings.Fields(string(output)), target) {
+		return fmt.Errorf("target platform %s is not supported by %s", target, goPath)
+	}
+	return nil
+}
+
 // Compress input into a temporary archive.
 func compressInput(inFile *os.File, tempDir string) error {
 	outFile, err := os.Create(filepath.Join(tempDir, "compressed"))
 	if err != nil {
 		return fmt.Errorf("error creating output file: %w", err)
 	}
-	defer func(outFile *os.File) {
-		if e := outFile.Close(); e != nil {
-			panic(e)
-		}
-	}(outFile)
-
 	var compressed int64
 	switch method {
 	case "zstd":
@@ -209,9 +238,10 @@ func compressInput(inFile *os.File, tempDir string) error {
 	case "gzip":
 		compressed, err = gzip.Compress(inFile, outFile, level)
 	default:
-		return fmt.Errorf("unsupported method: %s", method)
+		err = fmt.Errorf("unsupported method: %s", method)
 	}
-	if err != nil {
+	closeErr := outFile.Close()
+	if err = errors.Join(err, closeErr); err != nil {
 		return fmt.Errorf("error compressing file: %w", err)
 	}
 	if !quiet {
@@ -227,7 +257,7 @@ func buildDecompressor(tempDir string) error {
 		"-w",
 		"-X", "main.buildMode=" + runMode,
 	}
-	_, err := runner.Run(
+	err := runChecked(
 		[]string{"GOOS=" + system, "GOARCH=" + arch},
 		goPath,
 		[]string{
@@ -274,13 +304,13 @@ func packWithUpxIfNeeded(tempDir string) error {
 func runUpx(tempDir string, upxPath string, useWine bool) error {
 	upxArg := fmt.Sprintf("-%d", mapUpxLevel(upxLevel))
 	if useWine {
-		_, err := runner.Run(
+		err := runChecked(
 			[]string{},
 			winePath,
 			[]string{
-				expr.Ternary(strings.HasSuffix(upxPath, ".exe"), upxPath, upxPath+".exe"),
-				"output",
+				expr.Ternary(strings.EqualFold(filepath.Ext(upxPath), ".exe"), upxPath, upxPath+".exe"),
 				upxArg,
+				"output",
 			},
 			tempDir,
 			quiet,
@@ -294,10 +324,10 @@ func runUpx(tempDir string, upxPath string, useWine bool) error {
 		return nil
 	}
 
-	_, err := runner.Run(
+	err := runChecked(
 		[]string{},
 		upxPath,
-		[]string{"output", upxArg},
+		[]string{upxArg, "output"},
 		tempDir,
 		quiet,
 	)
@@ -320,46 +350,50 @@ func mapUpxLevel(level int) int {
 	return level
 }
 
+func runChecked(envs []string, binaryPath string, args []string, workingDir string, quiet bool) error {
+	code, err := runner.Run(envs, binaryPath, args, workingDir, quiet)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("command exited with code %d", code)
+	}
+	return nil
+}
+
 // Move output to the requested destination.
-func moveOutput(tempDir string, workDir string) error {
-	outputPath := filepath.Join(
-		workDir,
-		expr.Ternary(strings.HasSuffix(output, ".exe") || system != "windows", output, output+".exe"),
-	)
+func moveOutput(tempDir string, workDir string) (string, error) {
+	outputPath := resolveOutputPath(workDir)
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return "", fmt.Errorf("error creating output directory: %w", err)
+	}
 	if err := temp.MvFile(filepath.Join(tempDir, "output"), outputPath); err != nil {
-		return fmt.Errorf("error moving result: %w", err)
+		return "", fmt.Errorf("error moving result: %w", err)
 	}
 	if !quiet {
 		log.Println("Moved result")
 	}
-	return nil
+	return outputPath, nil
+}
+
+func resolveOutputPath(workDir string) string {
+	outputName := output
+	if system == "windows" && !strings.EqualFold(filepath.Ext(outputName), ".exe") {
+		outputName += ".exe"
+	}
+	if filepath.IsAbs(outputName) {
+		return filepath.Clean(outputName)
+	}
+	return filepath.Join(workDir, outputName)
 }
 
 // Fix executable bit on non-Windows targets.
-func chmodOutputIfNeeded(workDir string) error {
+func chmodOutputIfNeeded(outputPath string) error {
 	if runtime.GOOS == "windows" || system == "windows" {
 		return nil
 	}
-	if err := os.Chmod(filepath.Join(workDir, output), 0755); err != nil {
+	if err := os.Chmod(outputPath, 0755); err != nil {
 		return fmt.Errorf("setting executable permission failed: %w", err)
-	}
-	return nil
-}
-
-// Tidy go.mod for the decompressor workspace.
-func tidyModule(tempDir string) error {
-	_, err := runner.Run(
-		[]string{},
-		goPath,
-		[]string{"mod", "tidy"},
-		tempDir,
-		quiet,
-	)
-	if err != nil {
-		return fmt.Errorf("error tiding mod with go: %w", err)
-	}
-	if !quiet {
-		log.Println("Tidied up with go")
 	}
 	return nil
 }
