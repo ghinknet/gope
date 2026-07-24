@@ -1,7 +1,10 @@
-name: Unit test and Build test
+name: Integration test
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
     branches:
       - main
 
@@ -9,8 +12,7 @@ env:
   APP_NAME: gope
 
 jobs:
-  build:
-    if: github.ref == 'refs/heads/main'
+  integration:
     runs-on: node-24-alpine
 
     steps:
@@ -23,9 +25,9 @@ jobs:
         shell: sh
         run: |
           set -e
-          sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.aliyun.com/alpine#g' /etc/apk/repositories
+          sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#http://mirrors.98e-1.net/alpine#g' /etc/apk/repositories
           apk update
-          apk add --no-cache git ca-certificates curl tar xz
+          apk add --no-cache git ca-certificates curl tar xz make
 
       - name: Get Go version from go.mod
         id: get_go_version
@@ -83,7 +85,7 @@ jobs:
               aarch64|arm64) goarch="arm64" ;;
               *) goarch="amd64" ;;
             esac
-            url="https://mirrors.aliyun.com/golang/go${go_version}.linux-${goarch}.tar.gz"
+            url="http://mirrors.98e-1.net/golang/go${go_version}.linux-${goarch}.tar.gz"
             echo "Downloading: $url"
             curl -fsSL -o /tmp/go.tgz "$url"
             rm -rf /usr/local/go || true
@@ -94,31 +96,11 @@ jobs:
             echo "Existing go is sufficient: $current_go >= $go_version"
           fi
 
-      - name: Go test
+      - name: Run integration test
         shell: sh
         run: |
           set -e
           export PATH=/usr/local/go/bin:$PATH
           export GOPROXY=https://goproxy.cn,direct
           export GOSUMDB=off
-          # Placeholders for embed targets required by tests.
-          : > decomp_src
-          : > go_sdk
-          go test ./...
-
-      - name: Build Go application
-        shell: sh
-        run: |
-          set -e
-          export PATH=/usr/local/go/bin:$PATH
-          export GOPROXY=https://goproxy.cn,direct
-          export GOSUMDB=off
-          echo "Building Go application via builder..."
-          go run ./builder/build.go
-
-          if [ -d "dists" ]; then
-            echo "✅ Build artifacts in dists/"
-          else
-            echo "Binary build failed!"
-            exit 1
-          fi
+          make integration

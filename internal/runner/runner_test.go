@@ -35,3 +35,15 @@ func TestRunWorkingDir(t *testing.T) {
 	}
 }
 
+func TestRunSignalExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sh and Unix signals")
+	}
+	exitCode, err := Run(nil, "/bin/sh", []string{"-c", "kill -TERM $$"}, t.TempDir(), true)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exitCode != 143 {
+		t.Fatalf("exit code: got %d, want 143", exitCode)
+	}
+}

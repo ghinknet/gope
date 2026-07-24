@@ -8,8 +8,11 @@ func TestSupportedMethodsNotEmpty(t *testing.T) {
 	}
 }
 
-func TestSupportedPlatformsNotEmpty(t *testing.T) {
-	if len(SupportedPlatforms) == 0 {
-		t.Fatalf("SupportedPlatforms is empty")
+func TestSupportedSystems(t *testing.T) {
+	if !IsSupportedSystem("linux") {
+		t.Fatal("linux should be supported")
+	}
+	if IsSupportedSystem("plan9") {
+		t.Fatal("plan9 should be rejected")
 	}
 }

@@ -1,8 +1,10 @@
 package temp
 
 import (
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // Dir is the temporary directory object
@@ -32,32 +34,41 @@ func (d *Dir) Path() string {
 
 // MvFile moves file from temp src to dst
 func MvFile(src string, dst string) error {
+	// Prefer an atomic rename when source and destination share a filesystem.
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer func(srcFile *os.File) {
-		if e := srcFile.Close(); e != nil {
-			panic(e)
-		}
-	}(srcFile)
 
-	dstFile, err := os.Create(dst)
+	stagedFile, err := os.CreateTemp(filepath.Dir(dst), ".gope-output-*")
 	if err != nil {
+		_ = srcFile.Close()
 		return err
 	}
-	defer func(dstFile *os.File) {
-		if e := dstFile.Close(); e != nil {
-			panic(e)
+	stagedPath := stagedFile.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(stagedPath)
 		}
-	}(dstFile)
+	}()
 
-	if _, err = io.Copy(dstFile, srcFile); err != nil {
+	_, copyErr := io.Copy(stagedFile, srcFile)
+	syncErr := stagedFile.Sync()
+	stagedCloseErr := stagedFile.Close()
+	srcCloseErr := srcFile.Close()
+	if err = errors.Join(copyErr, syncErr, stagedCloseErr, srcCloseErr); err != nil {
 		return err
 	}
-	if err = dstFile.Sync(); err != nil {
+
+	if err = os.Rename(stagedPath, dst); err != nil {
 		return err
 	}
+	committed = true
 
 	return os.Remove(src)
 }

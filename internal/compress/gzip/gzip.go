@@ -2,6 +2,7 @@ package gzip
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -12,17 +13,26 @@ func Compress(src io.Reader, dst io.Writer, level int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	writer, err := gzip.NewWriterLevel(dst, mapped)
+	counted := &countingWriter{writer: dst}
+	writer, err := gzip.NewWriterLevel(counted, mapped)
 	if err != nil {
 		return 0, err
 	}
-	defer func(writer *gzip.Writer) {
-		if e := writer.Close(); e != nil {
-			panic(e)
-		}
-	}(writer)
 
-	return io.Copy(writer, src)
+	_, copyErr := io.Copy(writer, src)
+	closeErr := writer.Close()
+	return counted.written, errors.Join(copyErr, closeErr)
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	written int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.written += int64(n)
+	return n, err
 }
 
 // mapLevel converts 1-10 into gzip's level range.
